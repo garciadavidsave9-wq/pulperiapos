@@ -118,7 +118,7 @@ export default function Sale({ products, onConfirmSale }) {
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="Buscar por nombre, descripción o etiqueta…"
-          className="mb-4 min-h-16 w-full rounded-2xl border border-stone-200 bg-white px-5 text-xl shadow-sm dark:border-stone-700 dark:bg-stone-800"
+          className="mb-4 min-h-16 w-full rounded-2xl border border-stone-200 bg-white px-5 text-base shadow-sm dark:border-stone-700 dark:bg-stone-800 sm:text-xl"
         />
 
         {favorites.length > 0 && (
@@ -139,7 +139,7 @@ export default function Sale({ products, onConfirmSale }) {
           </div>
         )}
 
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-2">
           {filtered.map((p) => {
             const low = p.stock != null && p.stock <= LOW_STOCK
             const out = p.stock != null && p.stock <= 0

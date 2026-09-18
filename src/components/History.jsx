@@ -7,7 +7,7 @@ export default function History({ sales }) {
 
   return (
     <section className="mx-auto max-w-4xl space-y-4">
-      <div className="grid gap-3 sm:grid-cols-3">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <Stat label="Vendido hoy" value={formatMoney(report.total)} />
         <Stat label="Transacciones" value={String(report.count)} />
         <Stat label="Más vendido" value={report.top || '—'} />
@@ -21,9 +21,9 @@ export default function History({ sales }) {
         )}
         {sales.map((sale) => (
           <article key={sale.id} className="rounded-3xl bg-white p-4 shadow-card dark:bg-stone-800">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="text-lg font-black">{formatDateTime(sale.createdAt)}</h3>
-              <span className="text-xl font-black text-clay-600 dark:text-clay-400">{formatMoney(sale.total)}</span>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <h3 className="text-base font-black sm:text-lg">{formatDateTime(sale.createdAt)}</h3>
+              <span className="text-lg font-black text-clay-600 dark:text-clay-400 sm:text-xl">{formatMoney(sale.total)}</span>
             </div>
             <ul className="mt-2 space-y-1 text-stone-600 dark:text-stone-300">
               {sale.items.map((item, idx) => (

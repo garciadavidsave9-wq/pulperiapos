@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { compressImage } from '../lib/utils'
+import { compressImage, dataUrlToBlob, isValidImageFile } from '../lib/utils'
 import { LOW_STOCK, parseTags } from '../lib/utils'
 import { hasSupabaseConfig, supabase } from '../lib/supabase'
 
@@ -46,16 +46,28 @@ export default function ProductForm({ product, onSave, onCancel, busy }) {
   async function onFile(e) {
     const file = e.target.files?.[0]
     if (!file) return
+
+    if (!isValidImageFile(file)) {
+      setError('Solo se permiten imágenes JPG, PNG o WEBP. Intenta con otra imagen.')
+      e.target.value = ''
+      return
+    }
+
     setCompressing(true)
     setError('')
+    setPhotoInfo('')
+
     try {
-      const result = await compressImage(file)
+      const result = await compressImage(file, { maxWidth: 700, maxBytes: 130 * 1024, quality: 0.82 })
+      const finalSizeKb = Math.max(1, Math.round(result.bytes / 1024))
+
       if (hasSupabaseConfig() && supabase) {
         const fileName = `${Date.now()}-${file.name.replace(/\s+/g, '-').toLowerCase()}`
-        const { data, error } = await supabase.storage.from('product-photos').upload(fileName, file, {
+        const compressedBlob = result.blob || dataUrlToBlob(result.dataUrl)
+        const { data, error } = await supabase.storage.from('product-photos').upload(fileName, compressedBlob, {
           cacheControl: '3600',
           upsert: true,
-          contentType: file.type || 'image/jpeg',
+          contentType: 'image/jpeg',
         })
         if (error) throw error
         const { data: publicUrlData } = supabase.storage.from('product-photos').getPublicUrl(data.path)
@@ -63,9 +75,17 @@ export default function ProductForm({ product, onSave, onCancel, busy }) {
       } else {
         setForm((prev) => ({ ...prev, photo: result.dataUrl }))
       }
-      setPhotoInfo(`${result.width}×${result.height} · ${Math.round(result.bytes / 1024)} KB`)
-    } catch {
-      setError('No se pudo comprimir o subir la foto. Prueba con otra imagen.')
+
+      setPhotoInfo(`Imagen lista: ${finalSizeKb} KB`)
+    } catch (err) {
+      const rawMessage = err?.message || 'La imagen no pudo procesarse. Debe intentar con otra imagen.'
+      const message = /bucket/i.test(rawMessage)
+        ? 'No se pudo subir la foto porque el almacenamiento de imágenes no está disponible. Intenta con otra imagen o consulta la configuración del sistema.'
+        : rawMessage.includes('config') || rawMessage.includes('storage')
+          ? 'No se pudo subir la foto. Intenta con otra imagen o verifica la configuración del almacenamiento.'
+          : 'La imagen no pudo procesarse. Debe intentar con otra imagen.'
+      setError(message)
+      setForm((prev) => ({ ...prev, photo: '' }))
     } finally {
       setCompressing(false)
       e.target.value = ''
@@ -185,7 +205,7 @@ export default function ProductForm({ product, onSave, onCancel, busy }) {
               </div>
               <label className="min-h-14 cursor-pointer rounded-2xl bg-clay-500 px-5 py-3 text-lg font-semibold text-white">
                 {compressing ? 'Comprimiendo…' : 'Subir foto'}
-                <input type="file" accept="image/*" capture="environment" className="hidden" onChange={onFile} />
+                <input type="file" accept="image/jpeg,image/png,image/webp" capture="environment" className="hidden" onChange={onFile} />
               </label>
               {form.photo && (
                 <button
@@ -200,7 +220,7 @@ export default function ProductForm({ product, onSave, onCancel, busy }) {
                 </button>
               )}
             </div>
-            {photoInfo && <p className="mt-2 text-sm text-stone-500">Comprimida: {photoInfo}</p>}
+            {photoInfo && <p className="mt-2 text-sm font-semibold text-emerald-700 dark:text-emerald-300">{photoInfo}</p>}
           </div>
           <label className="flex min-h-14 items-center gap-3 rounded-2xl bg-stone-100 px-4 dark:bg-stone-900 sm:col-span-2">
             <input

@@ -29,14 +29,14 @@ export default function Inventory({ products, onSave, onDelete }) {
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="Buscar en inventario…"
-          className="min-h-14 flex-1 rounded-2xl border border-stone-200 bg-white px-4 text-lg shadow-sm dark:border-stone-700 dark:bg-stone-800"
+          className="min-h-14 flex-1 rounded-2xl border border-stone-200 bg-white px-4 text-base shadow-sm dark:border-stone-700 dark:bg-stone-800 sm:text-lg"
         />
         <button
           onClick={() => {
             setEditing(null)
             setCreating(true)
           }}
-          className="min-h-14 rounded-2xl bg-clay-500 px-6 text-lg font-bold text-white shadow-card"
+          className="min-h-14 rounded-2xl bg-clay-500 px-5 text-base font-bold text-white shadow-card sm:px-6 sm:text-lg"
         >
           + Agregar producto
         </button>

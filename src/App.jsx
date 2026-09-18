@@ -261,22 +261,22 @@ function Shell() {
   return (
     <div className="min-h-dvh bg-[#f4ece3] text-stone-900 dark:bg-stone-950 dark:text-stone-100">
       <header className="sticky top-0 z-20 border-b border-stone-200/80 bg-[#f4ece3]/90 backdrop-blur dark:border-stone-800 dark:bg-stone-950/90">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-3">
+        <div className="mx-auto flex max-w-7xl flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <p className="text-xs font-bold uppercase tracking-[0.18em] text-clay-600">Pulpería</p>
-            <h1 className="text-2xl font-black leading-none">Punto de venta</h1>
+            <h1 className="text-xl font-black leading-none sm:text-2xl">Punto de venta</h1>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={() => setDark((v) => !v)}
-              className="min-h-12 rounded-2xl bg-white px-4 font-bold shadow-sm dark:bg-stone-800"
+              className="min-h-12 rounded-2xl bg-white px-4 text-sm font-bold shadow-sm dark:bg-stone-800 sm:text-base"
             >
               {dark ? 'Claro' : 'Oscuro'}
             </button>
-            <button onClick={backup} className="min-h-12 rounded-2xl bg-white px-4 font-bold shadow-sm dark:bg-stone-800">
+            <button onClick={backup} className="min-h-12 rounded-2xl bg-white px-4 text-sm font-bold shadow-sm dark:bg-stone-800 sm:text-base">
               Exportar
             </button>
-            <label className="min-h-12 cursor-pointer rounded-2xl bg-white px-4 py-3 font-bold shadow-sm dark:bg-stone-800">
+            <label className="min-h-12 cursor-pointer rounded-2xl bg-white px-4 py-3 text-sm font-bold shadow-sm dark:bg-stone-800 sm:text-base">
               Importar
               <input
                 type="file"
