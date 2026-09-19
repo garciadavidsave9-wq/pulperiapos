@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { Html5Qrcode } from 'html5-qrcode'
 import { compressImage, dataUrlToBlob, isValidImageFile } from '../lib/utils'
 import { LOW_STOCK, parseTags } from '../lib/utils'
 import { hasSupabaseConfig, supabase } from '../lib/supabase'
@@ -25,10 +26,7 @@ export default function ProductForm({ product, products = [], onSave, onCancel, 
   const [scannerBusy, setScannerBusy] = useState(false)
   const [duplicateProduct, setDuplicateProduct] = useState(null)
 
-  const videoRef = useRef(null)
-  const streamRef = useRef(null)
-  const scanLoopRef = useRef(null)
-  const codeReaderRef = useRef(null)
+  const scannerRef = useRef(null)
 
   function formatScannerError(stage, err) {
     const name = err?.name || 'Error'
@@ -67,27 +65,13 @@ export default function ProductForm({ product, products = [], onSave, onCancel, 
   }, [form.stock])
 
   async function stopScanner() {
-    if (scanLoopRef.current) {
-      clearInterval(scanLoopRef.current)
-      scanLoopRef.current = null
-    }
-
-    if (codeReaderRef.current) {
+    if (scannerRef.current) {
       try {
-        codeReaderRef.current.reset?.()
+        await scannerRef.current.stop()
       } catch {
-        // Ignora errores de cierre del lector.
+        // Ignora errores de cierre del scanner.
       }
-      codeReaderRef.current = null
-    }
-
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop())
-      streamRef.current = null
-    }
-
-    if (videoRef.current) {
-      videoRef.current.srcObject = null
+      scannerRef.current = null
     }
   }
 
@@ -142,101 +126,52 @@ export default function ProductForm({ product, products = [], onSave, onCancel, 
 
     const initializeCamera = async () => {
       try {
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          throw Object.assign(new Error('getUserMedia no está disponible en este navegador.'), { name: 'NotSupportedError' })
-        }
-
-        const video = videoRef.current
-        if (!video) {
-          throw Object.assign(new Error('El elemento <video> no está montado en el DOM.'), { name: 'DOMException' })
-        }
-
         setScannerBusy(true)
         setError('')
         setScanInfo('Solicitando acceso a la cámara…')
 
-        const constraintsList = [
-          { video: { facingMode: { ideal: 'environment' } } },
-          { video: { facingMode: 'environment' } },
-          { video: true },
-        ]
-
-        let stream = null
-        let lastError = null
-        for (const constraint of constraintsList) {
-          try {
-            stream = await navigator.mediaDevices.getUserMedia(constraint)
-            break
-          } catch (err) {
-            lastError = err
-          }
+        const containerId = 'barcode-reader'
+        let container = document.getElementById(containerId)
+        if (!container) {
+          container = document.createElement('div')
+          container.id = containerId
+          container.style.display = 'block'
+          container.style.width = '100%'
+          container.style.maxWidth = '420px'
+          container.style.margin = '0 auto'
+          document.body.appendChild(container)
         }
 
-        if (!stream) {
-          throw lastError || Object.assign(new Error('No se pudo obtener el stream de cámara.'), { name: 'NotReadableError' })
+        if (cancelled) return
+
+        const html5QrCode = new Html5Qrcode(containerId)
+        scannerRef.current = html5QrCode
+
+        const config = {
+          fps: 10,
+          qrbox: { width: 250, height: 150 },
+          aspectRatio: 1.33,
         }
 
-        if (cancelled) {
-          stream.getTracks().forEach((track) => track.stop())
-          return
-        }
-
-        streamRef.current = stream
-        video.srcObject = stream
-        video.muted = true
-        video.playsInline = true
-        video.setAttribute('playsinline', 'true')
-        video.setAttribute('autoplay', 'true')
-        await video.play()
-
-        if ('BarcodeDetector' in window) {
-          try {
-            const detector = new window.BarcodeDetector({ formats: ['ean_13', 'upc_a'] })
-            scanLoopRef.current = setInterval(async () => {
-              try {
-                if (!videoRef.current || !videoRef.current.videoWidth) return
-                const detected = await detector.detect(videoRef.current)
-                const candidate = detected.find((item) => normalizeBarcode(item.rawValue).length >= 8)
-                if (candidate) {
-                  clearInterval(scanLoopRef.current)
-                  scanLoopRef.current = null
-                  await handleScannedCode(candidate.rawValue)
-                }
-              } catch (err) {
-                // El detector puede fallar mientras se re-renderiza la cámara; lo ignoramos y se reintenta.
-              }
-            }, 700)
-            return
-          } catch (err) {
-            throw Object.assign(err, {
-              name: err?.name || 'BarcodeDetectorError',
-              message: err?.message || 'No se pudo inicializar BarcodeDetector en este navegador.',
-            })
-          }
-        }
-
-        const { BrowserCodeReader } = await import('@zxing/browser')
-        const codeReader = new BrowserCodeReader()
-        codeReaderRef.current = codeReader
-        const devices = await codeReader.getVideoInputDevices()
-        const preferredDevice = devices.find((device) => /back|rear|environment/i.test(device.label || '')) || devices[0]
-        if (!preferredDevice) {
-          throw Object.assign(new Error('No se encontró una cámara disponible en el dispositivo.'), { name: 'NotFoundError' })
-        }
-
-        codeReader.decodeFromVideoDevice(preferredDevice.deviceId, video, async (result, error) => {
-          if (!result) {
-            if (error && !/NotFoundException|NotFound/.test(String(error))) {
-              setError(formatScannerError('decoder', error))
+        await html5QrCode.start(
+          { facingMode: 'environment' },
+          config,
+          async (decodedText) => {
+            await handleScannedCode(decodedText)
+            try {
+              await html5QrCode.stop()
+            } catch {
+              // Ignora cierre del escáner.
             }
-            return
-          }
-
-          await handleScannedCode(result.getText())
-        })
+            setScannerOpen(false)
+          },
+          () => {
+            // Ignoramos los frames sin lectura; se reintenta automáticamente.
+          },
+          ['EAN_13', 'UPC_A']
+        )
       } catch (err) {
-        const message = formatScannerError('getUserMedia / render / detector', err)
-        setError(message)
+        setError(formatScannerError('start()', err))
         setScanInfo('')
         setScannerOpen(false)
       } finally {
@@ -253,6 +188,14 @@ export default function ProductForm({ product, products = [], onSave, onCancel, 
     return () => {
       cancelled = true
       cancelAnimationFrame(frame)
+      if (scannerRef.current) {
+        scannerRef.current.stop().catch(() => {})
+        scannerRef.current = null
+      }
+      const container = document.getElementById('barcode-reader')
+      if (container && container.dataset.generated === 'true') {
+        container.remove()
+      }
     }
   }, [scannerOpen])
 
@@ -402,7 +345,7 @@ export default function ProductForm({ product, products = [], onSave, onCancel, 
                   Cerrar
                 </button>
               </div>
-              <video ref={videoRef} className="aspect-video w-full rounded-2xl bg-black object-cover" playsInline muted />
+              <div id="barcode-reader" className="aspect-video w-full overflow-hidden rounded-2xl bg-black" />
               <div className="mt-3 flex items-center justify-between gap-2 text-sm text-stone-600 dark:text-stone-300">
                 <span>{scannerBusy ? 'Activando cámara…' : 'Apunta al código EAN-13 o UPC-A'}</span>
               </div>
