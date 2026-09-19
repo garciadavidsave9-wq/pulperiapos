@@ -30,6 +30,12 @@ export default function ProductForm({ product, products = [], onSave, onCancel, 
   const scanLoopRef = useRef(null)
   const codeReaderRef = useRef(null)
 
+  function formatScannerError(stage, err) {
+    const name = err?.name || 'Error'
+    const message = err?.message || 'Sin detalle disponible.'
+    return `Escáner (${stage}) falló: ${name}: ${message}`
+  }
+
   useEffect(() => {
     if (product) {
       setForm({
@@ -129,81 +135,132 @@ export default function ProductForm({ product, products = [], onSave, onCancel, 
     }
   }
 
-  async function startScanner() {
-    try {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        setError('La cámara no está disponible en este navegador. Intenta con un dispositivo compatible.')
-        setScannerOpen(false)
-        return
-      }
+  useEffect(() => {
+    if (!scannerOpen) return
 
-      setError('')
-      setScanInfo('Solicitando acceso a la cámara…')
-      setScannerOpen(true)
-      setScannerBusy(true)
+    let cancelled = false
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
-        audio: false,
-      })
+    const initializeCamera = async () => {
+      try {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          throw Object.assign(new Error('getUserMedia no está disponible en este navegador.'), { name: 'NotSupportedError' })
+        }
 
-      streamRef.current = stream
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream
-        videoRef.current.muted = true
-        videoRef.current.playsInline = true
-        await videoRef.current.play()
-      }
+        const video = videoRef.current
+        if (!video) {
+          throw Object.assign(new Error('El elemento <video> no está montado en el DOM.'), { name: 'DOMException' })
+        }
 
-      if ('BarcodeDetector' in window) {
-        const detector = new window.BarcodeDetector({ formats: ['ean_13', 'upc_a'] })
-        scanLoopRef.current = setInterval(async () => {
+        setScannerBusy(true)
+        setError('')
+        setScanInfo('Solicitando acceso a la cámara…')
+
+        const constraintsList = [
+          { video: { facingMode: { ideal: 'environment' } } },
+          { video: { facingMode: 'environment' } },
+          { video: true },
+        ]
+
+        let stream = null
+        let lastError = null
+        for (const constraint of constraintsList) {
           try {
-            if (!videoRef.current || !videoRef.current.videoWidth) return
-            const detected = await detector.detect(videoRef.current)
-            const candidate = detected.find((item) => normalizeBarcode(item.rawValue).length >= 8)
-            if (candidate) {
-              clearInterval(scanLoopRef.current)
-              scanLoopRef.current = null
-              await handleScannedCode(candidate.rawValue)
-            }
-          } catch {
-            // Intenta de nuevo con la siguiente iteración.
+            stream = await navigator.mediaDevices.getUserMedia(constraint)
+            break
+          } catch (err) {
+            lastError = err
           }
-        }, 700)
-        return
-      }
+        }
 
-      const { BrowserCodeReader } = await import('@zxing/browser')
-      const codeReader = new BrowserCodeReader()
-      codeReaderRef.current = codeReader
-      const devices = await codeReader.getVideoInputDevices()
-      const preferredDevice = devices.find((device) => /back|rear|environment/i.test(device.label || '')) || devices[0]
-      if (!preferredDevice) throw new Error('Cámara no disponible')
+        if (!stream) {
+          throw lastError || Object.assign(new Error('No se pudo obtener el stream de cámara.'), { name: 'NotReadableError' })
+        }
 
-      codeReader.decodeFromVideoDevice(preferredDevice.deviceId, videoRef.current, async (result, error) => {
-        if (result) {
+        if (cancelled) {
+          stream.getTracks().forEach((track) => track.stop())
+          return
+        }
+
+        streamRef.current = stream
+        video.srcObject = stream
+        video.muted = true
+        video.playsInline = true
+        video.setAttribute('playsinline', 'true')
+        video.setAttribute('autoplay', 'true')
+        await video.play()
+
+        if ('BarcodeDetector' in window) {
+          try {
+            const detector = new window.BarcodeDetector({ formats: ['ean_13', 'upc_a'] })
+            scanLoopRef.current = setInterval(async () => {
+              try {
+                if (!videoRef.current || !videoRef.current.videoWidth) return
+                const detected = await detector.detect(videoRef.current)
+                const candidate = detected.find((item) => normalizeBarcode(item.rawValue).length >= 8)
+                if (candidate) {
+                  clearInterval(scanLoopRef.current)
+                  scanLoopRef.current = null
+                  await handleScannedCode(candidate.rawValue)
+                }
+              } catch (err) {
+                // El detector puede fallar mientras se re-renderiza la cámara; lo ignoramos y se reintenta.
+              }
+            }, 700)
+            return
+          } catch (err) {
+            throw Object.assign(err, {
+              name: err?.name || 'BarcodeDetectorError',
+              message: err?.message || 'No se pudo inicializar BarcodeDetector en este navegador.',
+            })
+          }
+        }
+
+        const { BrowserCodeReader } = await import('@zxing/browser')
+        const codeReader = new BrowserCodeReader()
+        codeReaderRef.current = codeReader
+        const devices = await codeReader.getVideoInputDevices()
+        const preferredDevice = devices.find((device) => /back|rear|environment/i.test(device.label || '')) || devices[0]
+        if (!preferredDevice) {
+          throw Object.assign(new Error('No se encontró una cámara disponible en el dispositivo.'), { name: 'NotFoundError' })
+        }
+
+        codeReader.decodeFromVideoDevice(preferredDevice.deviceId, video, async (result, error) => {
+          if (!result) {
+            if (error && !/NotFoundException|NotFound/.test(String(error))) {
+              setError(formatScannerError('decoder', error))
+            }
+            return
+          }
+
           await handleScannedCode(result.getText())
+        })
+      } catch (err) {
+        const message = formatScannerError('getUserMedia / render / detector', err)
+        setError(message)
+        setScanInfo('')
+        setScannerOpen(false)
+      } finally {
+        if (!cancelled) {
+          setScannerBusy(false)
         }
-        if (error && !/NotFoundException|NotFound/.test(String(error))) {
-          setError('No se pudo leer el código con la cámara. Intenta nuevamente.')
-        }
-      })
-    } catch (err) {
-      const raw = err?.message || 'No se pudo abrir la cámara.'
-      const message = raw.includes('Permission') || raw.includes('denied')
-        ? 'Se denegó el acceso a la cámara. Permítela para escanear códigos.'
-        : 'No se pudo abrir la cámara. Intenta nuevamente o usa el teclado para ingresar el código.'
-      setError(message)
-      setScanInfo('')
-      setScannerOpen(false)
-    } finally {
-      setScannerBusy(false)
+      }
     }
+
+    const frame = requestAnimationFrame(() => {
+      initializeCamera()
+    })
+
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(frame)
+    }
+  }, [scannerOpen])
+
+  async function startScanner() {
+    await stopScanner()
+    setError('')
+    setScanInfo('Preparando cámara…')
+    setScannerOpen(true)
   }
 
   async function onFile(e) {
