@@ -16,8 +16,9 @@ export default function Inventory({ products, onSave, onDelete }) {
 
   async function save(data) {
     setBusy(true)
-    await onSave(editing ? { ...editing, ...data } : data)
+    const saved = await onSave(editing ? { ...editing, ...data } : data)
     setBusy(false)
+    if (saved === false) return
     setEditing(null)
     setCreating(false)
   }
@@ -104,10 +105,15 @@ export default function Inventory({ products, onSave, onDelete }) {
       {(creating || editing) && (
         <ProductForm
           product={editing}
+          products={products}
           busy={busy}
           onCancel={() => {
             setCreating(false)
             setEditing(null)
+          }}
+          onEditExisting={(product) => {
+            setCreating(false)
+            setEditing(product)
           }}
           onSave={save}
         />

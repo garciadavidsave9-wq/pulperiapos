@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { compressImage, dataUrlToBlob, isValidImageFile } from '../lib/utils'
 import { LOW_STOCK, parseTags } from '../lib/utils'
 import { hasSupabaseConfig, supabase } from '../lib/supabase'
+import { fetchProductFromOpenFoodFacts, findDuplicateProduct, normalizeBarcode } from '../lib/barcode'
 
 const EMPTY = {
   name: '',
   description: '',
+  codigo_barras: '',
   price: '',
   tags: '',
   stock: '',
@@ -13,17 +15,27 @@ const EMPTY = {
   photo: '',
 }
 
-export default function ProductForm({ product, onSave, onCancel, busy }) {
+export default function ProductForm({ product, products = [], onSave, onCancel, busy, onEditExisting }) {
   const [form, setForm] = useState(EMPTY)
   const [error, setError] = useState('')
   const [compressing, setCompressing] = useState(false)
   const [photoInfo, setPhotoInfo] = useState('')
+  const [scanInfo, setScanInfo] = useState('')
+  const [scannerOpen, setScannerOpen] = useState(false)
+  const [scannerBusy, setScannerBusy] = useState(false)
+  const [duplicateProduct, setDuplicateProduct] = useState(null)
+
+  const videoRef = useRef(null)
+  const streamRef = useRef(null)
+  const scanLoopRef = useRef(null)
+  const codeReaderRef = useRef(null)
 
   useEffect(() => {
     if (product) {
       setForm({
         name: product.name || '',
         description: product.description || '',
+        codigo_barras: product.codigo_barras || '',
         price: product.price ?? '',
         tags: (product.tags || []).join(', '),
         stock: product.stock ?? '',
@@ -35,6 +47,11 @@ export default function ProductForm({ product, onSave, onCancel, busy }) {
       setForm(EMPTY)
     }
     setError('')
+    setScanInfo('')
+    setDuplicateProduct(null)
+    return () => {
+      stopScanner()
+    }
   }, [product])
 
   const title = product ? 'Editar producto' : 'Nuevo producto'
@@ -42,6 +59,152 @@ export default function ProductForm({ product, onSave, onCancel, busy }) {
     if (form.stock === '' || form.stock == null) return false
     return Number(form.stock) <= LOW_STOCK
   }, [form.stock])
+
+  async function stopScanner() {
+    if (scanLoopRef.current) {
+      clearInterval(scanLoopRef.current)
+      scanLoopRef.current = null
+    }
+
+    if (codeReaderRef.current) {
+      try {
+        codeReaderRef.current.reset?.()
+      } catch {
+        // Ignora errores de cierre del lector.
+      }
+      codeReaderRef.current = null
+    }
+
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop())
+      streamRef.current = null
+    }
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = null
+    }
+  }
+
+  async function handleScannedCode(rawValue) {
+    const normalized = normalizeBarcode(rawValue)
+    if (!normalized) {
+      setError('No se pudo leer un código válido. Intenta otra vez.')
+      return
+    }
+
+    setForm((prev) => ({ ...prev, codigo_barras: normalized }))
+    setScanInfo('Código detectado. Verificando producto…')
+    setError('')
+    setDuplicateProduct(null)
+
+    const duplicate = findDuplicateProduct(products, normalized, product?.id)
+    if (duplicate) {
+      setDuplicateProduct(duplicate)
+      setScanInfo('')
+      setError('Este producto ya existe.')
+      await stopScanner()
+      setScannerOpen(false)
+      return
+    }
+
+    try {
+      const productMatch = await fetchProductFromOpenFoodFacts(normalized)
+      if (productMatch) {
+        setForm((prev) => ({
+          ...prev,
+          name: productMatch.name || prev.name,
+          description: productMatch.description || prev.description,
+          codigo_barras: normalized,
+        }))
+        setScanInfo('Datos cargados desde Open Food Facts. Puedes corregirlos antes de guardar.')
+        setError('')
+      } else {
+        setScanInfo('Producto no encontrado, completa los datos manualmente.')
+      }
+    } catch {
+      setScanInfo('Producto no encontrado, completa los datos manualmente.')
+    } finally {
+      await stopScanner()
+      setScannerOpen(false)
+    }
+  }
+
+  async function startScanner() {
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setError('La cámara no está disponible en este navegador. Intenta con un dispositivo compatible.')
+        setScannerOpen(false)
+        return
+      }
+
+      setError('')
+      setScanInfo('Solicitando acceso a la cámara…')
+      setScannerOpen(true)
+      setScannerBusy(true)
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: false,
+      })
+
+      streamRef.current = stream
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream
+        videoRef.current.muted = true
+        videoRef.current.playsInline = true
+        await videoRef.current.play()
+      }
+
+      if ('BarcodeDetector' in window) {
+        const detector = new window.BarcodeDetector({ formats: ['ean_13', 'upc_a'] })
+        scanLoopRef.current = setInterval(async () => {
+          try {
+            if (!videoRef.current || !videoRef.current.videoWidth) return
+            const detected = await detector.detect(videoRef.current)
+            const candidate = detected.find((item) => normalizeBarcode(item.rawValue).length >= 8)
+            if (candidate) {
+              clearInterval(scanLoopRef.current)
+              scanLoopRef.current = null
+              await handleScannedCode(candidate.rawValue)
+            }
+          } catch {
+            // Intenta de nuevo con la siguiente iteración.
+          }
+        }, 700)
+        return
+      }
+
+      const { BrowserCodeReader } = await import('@zxing/browser')
+      const codeReader = new BrowserCodeReader()
+      codeReaderRef.current = codeReader
+      const devices = await codeReader.getVideoInputDevices()
+      const preferredDevice = devices.find((device) => /back|rear|environment/i.test(device.label || '')) || devices[0]
+      if (!preferredDevice) throw new Error('Cámara no disponible')
+
+      codeReader.decodeFromVideoDevice(preferredDevice.deviceId, videoRef.current, async (result, error) => {
+        if (result) {
+          await handleScannedCode(result.getText())
+        }
+        if (error && !/NotFoundException|NotFound/.test(String(error))) {
+          setError('No se pudo leer el código con la cámara. Intenta nuevamente.')
+        }
+      })
+    } catch (err) {
+      const raw = err?.message || 'No se pudo abrir la cámara.'
+      const message = raw.includes('Permission') || raw.includes('denied')
+        ? 'Se denegó el acceso a la cámara. Permítela para escanear códigos.'
+        : 'No se pudo abrir la cámara. Intenta nuevamente o usa el teclado para ingresar el código.'
+      setError(message)
+      setScanInfo('')
+      setScannerOpen(false)
+    } finally {
+      setScannerBusy(false)
+    }
+  }
 
   async function onFile(e) {
     const file = e.target.files?.[0]
@@ -105,7 +268,9 @@ export default function ProductForm({ product, onSave, onCancel, busy }) {
       return
     }
     onSave({
+      ...product,
       name,
+      codigo_barras: normalizeBarcode(form.codigo_barras || ''),
       description: form.description.trim(),
       price,
       tags: parseTags(form.tags),
@@ -133,15 +298,82 @@ export default function ProductForm({ product, onSave, onCancel, busy }) {
         </div>
 
         <div className="grid gap-4 sm:grid-cols-2">
-          <label className="block sm:col-span-2">
-            <span className="mb-1 block text-sm font-semibold text-stone-600 dark:text-stone-300">Nombre *</span>
+          <div className="block sm:col-span-2">
+            <div className="mb-1 flex items-center justify-between gap-2">
+              <span className="text-sm font-semibold text-stone-600 dark:text-stone-300">Nombre *</span>
+              <button
+                type="button"
+                onClick={startScanner}
+                className="rounded-2xl bg-emerald-100 px-3 py-2 text-xs font-bold text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200"
+              >
+                Escanear código de barras
+              </button>
+            </div>
             <input
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
               className="min-h-14 w-full rounded-2xl border border-stone-200 bg-stone-50 px-4 text-lg dark:border-stone-600 dark:bg-stone-900"
               placeholder="Ej. Coca-Cola fresca 600ml"
             />
-          </label>
+          </div>
+
+          <div className="block sm:col-span-2">
+            <label className="mb-1 block text-sm font-semibold text-stone-600 dark:text-stone-300">Código de barras</label>
+            <input
+              value={form.codigo_barras}
+              onChange={(e) => setForm({ ...form, codigo_barras: normalizeBarcode(e.target.value) })}
+              type="text"
+              inputMode="numeric"
+              className="min-h-14 w-full rounded-2xl border border-stone-200 bg-stone-50 px-4 text-lg dark:border-stone-600 dark:bg-stone-900"
+              placeholder="Escanea o ingresa el código"
+            />
+          </div>
+
+          {scannerOpen && (
+            <div className="sm:col-span-2 overflow-hidden rounded-3xl border border-stone-200 bg-stone-100 p-3 dark:border-stone-700 dark:bg-stone-900">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <p className="text-sm font-semibold text-stone-700 dark:text-stone-200">Escáner</p>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await stopScanner()
+                    setScannerOpen(false)
+                    setScanInfo('')
+                  }}
+                  className="rounded-xl bg-stone-200 px-3 py-1.5 text-sm font-bold dark:bg-stone-700"
+                >
+                  Cerrar
+                </button>
+              </div>
+              <video ref={videoRef} className="aspect-video w-full rounded-2xl bg-black object-cover" playsInline muted />
+              <div className="mt-3 flex items-center justify-between gap-2 text-sm text-stone-600 dark:text-stone-300">
+                <span>{scannerBusy ? 'Activando cámara…' : 'Apunta al código EAN-13 o UPC-A'}</span>
+              </div>
+            </div>
+          )}
+
+          {duplicateProduct && (
+            <div className="sm:col-span-2 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-800 dark:bg-amber-950/30">
+              <p className="text-sm font-semibold text-amber-800 dark:text-amber-200">Este producto ya existe: {duplicateProduct.name}</p>
+              <button
+                type="button"
+                onClick={() => {
+                  if (onEditExisting) onEditExisting(duplicateProduct)
+                  onCancel()
+                }}
+                className="mt-2 rounded-xl bg-amber-500 px-3 py-2 text-sm font-bold text-white"
+              >
+                Editar producto existente
+              </button>
+            </div>
+          )}
+
+          {scanInfo && (
+            <p className="sm:col-span-2 rounded-2xl bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300">
+              {scanInfo}
+            </p>
+          )}
+
           <label className="block sm:col-span-2">
             <span className="mb-1 block text-sm font-semibold text-stone-600 dark:text-stone-300">Descripción</span>
             <textarea
