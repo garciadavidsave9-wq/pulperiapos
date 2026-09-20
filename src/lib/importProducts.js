@@ -1,4 +1,3 @@
-import { normalizeBarcode } from './barcode'
 import { parseTags } from './utils'
 
 const HEADER_ALIASES = {
@@ -18,10 +17,6 @@ const HEADER_ALIASES = {
   categorias: 'categorias',
   tags: 'categorias',
   etiquetas: 'categorias',
-  'codigo de barras': 'codigoBarras',
-  'código de barras': 'codigoBarras',
-  barcode: 'codigoBarras',
-  codigo_barras: 'codigoBarras',
 }
 
 function normalizeHeader(value = '') {
@@ -67,7 +62,6 @@ export function parseImportedRows(rows = []) {
     const rawPrice = pickValue(row, ['Precio', 'precio', 'price'])
     const rawStock = pickValue(row, ['Cantidad disponible', 'cantidad', 'stock'])
     const rawTags = pickValue(row, ['Categorías / etiquetas', 'categorias', 'tags', 'etiquetas'])
-    const rawBarcode = pickValue(row, ['Código de barras', 'codigo de barras', 'barcode', 'codigo_barras'])
 
     const name = String(rawName ?? '').trim()
     if (!name) {
@@ -96,7 +90,6 @@ export function parseImportedRows(rows = []) {
       price: Number(priceValue.toFixed(2)),
       stock: Number.isFinite(parsedStock) && Number(parsedStock) >= 0 ? Number(parsedStock) : null,
       tags: parseTags(String(rawTags ?? '')),
-      codigo_barras: normalizeBarcode(rawBarcode || ''),
       favorite: false,
       photo: '',
     })

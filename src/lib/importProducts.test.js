@@ -30,7 +30,6 @@ describe('importProducts helpers', () => {
       name: 'Arroz 5kg',
       price: 42.5,
       stock: 10,
-      codigo_barras: '1234567890128',
     })
     expect(result.invalidRows[0].reason).toContain('Nombre')
     expect(result.invalidRows[1].reason).toContain('Precio')

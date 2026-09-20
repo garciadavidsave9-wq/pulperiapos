@@ -8,7 +8,6 @@ import History from './components/History'
 import { hasSupabaseConfig, supabase } from './lib/supabase'
 import { deleteItem, exportAll, getAll, importAll, putItem, uid } from './lib/db'
 import { seedIfNeeded } from './lib/seed'
-import { findDuplicateProduct, normalizeBarcode } from './lib/barcode'
 import { parseImportedRows } from './lib/importProducts'
 
 const NAV = [
@@ -58,7 +57,6 @@ function Shell() {
             id: item.id,
             name: item.name,
             description: item.description || '',
-            codigo_barras: item.codigo_barras || '',
             price: Number(item.price_lempiras || 0),
             tags: Array.isArray(item.tags) ? item.tags : [],
             stock: item.stock == null ? null : Number(item.stock),
@@ -107,7 +105,6 @@ function Shell() {
       ])
       const normalizedProducts = (productsRes.data || []).map((item) => ({
         ...item,
-        codigo_barras: item.codigo_barras || '',
         price: Number(item.price_lempiras || 0),
         tags: Array.isArray(item.tags) ? item.tags : [],
         stock: item.stock == null ? null : Number(item.stock),
@@ -135,36 +132,16 @@ function Shell() {
     const now = new Date().toISOString()
     const item = {
       ...data,
-      codigo_barras: normalizeBarcode(data.codigo_barras || ''),
       id: data.id || uid('prd'),
       createdAt: data.createdAt || now,
       updatedAt: now,
     }
 
-    const duplicate = findDuplicateProduct(products, item.codigo_barras, item.id)
-    if (duplicate) {
-      push('Este producto ya existe. Edita el existente o cambia el código de barras.', 'warn')
-      return false
-    }
-
     if (hasSupabaseConfig() && supabase) {
-      const { data: existing, error: existingError } = await supabase
-        .from('products')
-        .select('id, name')
-        .eq('codigo_barras', item.codigo_barras)
-        .neq('id', item.id)
-
-      if (existingError) throw existingError
-      if ((existing || []).length > 0) {
-        push('Este producto ya existe. Edita el existente o cambia el código de barras.', 'warn')
-        return false
-      }
-
       const { error } = await supabase.from('products').upsert({
         id: item.id,
         name: item.name,
         description: item.description || '',
-        codigo_barras: item.codigo_barras,
         price_lempiras: Number(item.price || 0),
         tags: Array.isArray(item.tags) ? item.tags : [],
         stock: item.stock == null ? null : Number(item.stock),
@@ -342,7 +319,6 @@ function Shell() {
       id: uid('prd'),
       name: String(row.name || '').trim(),
       description: String(row.description || '').trim(),
-      codigo_barras: normalizeBarcode(row.codigo_barras || ''),
       price: Number(row.price || 0),
       tags: Array.isArray(row.tags) ? row.tags : [],
       stock: row.stock == null || row.stock === '' ? null : Number(row.stock),
@@ -359,7 +335,6 @@ function Shell() {
             id: product.id,
             name: product.name,
             description: product.description || '',
-            codigo_barras: product.codigo_barras,
             price_lempiras: Number(product.price || 0),
             tags: product.tags,
             stock: product.stock == null ? null : Number(product.stock),

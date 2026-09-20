@@ -105,15 +105,10 @@ export default function Inventory({ products, onSave, onDelete }) {
       {(creating || editing) && (
         <ProductForm
           product={editing}
-          products={products}
           busy={busy}
           onCancel={() => {
             setCreating(false)
             setEditing(null)
-          }}
-          onEditExisting={(product) => {
-            setCreating(false)
-            setEditing(product)
           }}
           onSave={save}
         />

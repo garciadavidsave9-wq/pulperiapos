@@ -2,12 +2,10 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { compressImage, dataUrlToBlob, isValidImageFile } from '../lib/utils'
 import { LOW_STOCK, parseTags } from '../lib/utils'
 import { hasSupabaseConfig, supabase } from '../lib/supabase'
-import { findDuplicateProduct, normalizeBarcode } from '../lib/barcode'
 
 const EMPTY = {
   name: '',
   description: '',
-  codigo_barras: '',
   price: '',
   tags: '',
   stock: '',
@@ -15,14 +13,13 @@ const EMPTY = {
   photo: '',
 }
 
-export default function ProductForm({ product, products = [], onSave, onCancel, busy, onEditExisting }) {
+export default function ProductForm({ product, onSave, onCancel, busy }) {
   const [form, setForm] = useState(EMPTY)
   const [error, setError] = useState('')
   const [compressing, setCompressing] = useState(false)
   const [photoInfo, setPhotoInfo] = useState('')
   const [voiceMessage, setVoiceMessage] = useState('')
   const [voiceListening, setVoiceListening] = useState(false)
-  const [duplicateProduct, setDuplicateProduct] = useState(null)
 
   const recognitionRef = useRef(null)
   const voiceSupported = typeof window !== 'undefined' && ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window)
@@ -32,7 +29,6 @@ export default function ProductForm({ product, products = [], onSave, onCancel, 
       setForm({
         name: product.name || '',
         description: product.description || '',
-        codigo_barras: product.codigo_barras || '',
         price: product.price ?? '',
         tags: (product.tags || []).join(', '),
         stock: product.stock ?? '',
@@ -45,7 +41,6 @@ export default function ProductForm({ product, products = [], onSave, onCancel, 
     }
     setError('')
     setVoiceMessage('')
-    setDuplicateProduct(null)
     return () => {
       if (recognitionRef.current) {
         recognitionRef.current.stop()
@@ -197,7 +192,6 @@ export default function ProductForm({ product, products = [], onSave, onCancel, 
     onSave({
       ...product,
       name,
-      codigo_barras: normalizeBarcode(form.codigo_barras || ''),
       description: form.description.trim(),
       price,
       tags: parseTags(form.tags),
@@ -257,34 +251,6 @@ export default function ProductForm({ product, products = [], onSave, onCancel, 
               <p className="mt-2 text-xs font-semibold text-emerald-700 dark:text-emerald-300">{voiceMessage}</p>
             )}
           </div>
-
-          <div className="block sm:col-span-2">
-            <label className="mb-1 block text-sm font-semibold text-stone-600 dark:text-stone-300">Código de barras</label>
-            <input
-              value={form.codigo_barras}
-              onChange={(e) => setForm({ ...form, codigo_barras: normalizeBarcode(e.target.value) })}
-              type="text"
-              inputMode="numeric"
-              className="min-h-14 w-full rounded-2xl border border-stone-200 bg-stone-50 px-4 text-lg dark:border-stone-600 dark:bg-stone-900"
-              placeholder="Opcional: para registrar el código manualmente"
-            />
-          </div>
-
-          {duplicateProduct && (
-            <div className="sm:col-span-2 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-800 dark:bg-amber-950/30">
-              <p className="text-sm font-semibold text-amber-800 dark:text-amber-200">Este producto ya existe: {duplicateProduct.name}</p>
-              <button
-                type="button"
-                onClick={() => {
-                  if (onEditExisting) onEditExisting(duplicateProduct)
-                  onCancel()
-                }}
-                className="mt-2 rounded-xl bg-amber-500 px-3 py-2 text-sm font-bold text-white"
-              >
-                Editar producto existente
-              </button>
-            </div>
-          )}
 
           <label className="block sm:col-span-2">
             <span className="mb-1 block text-sm font-semibold text-stone-600 dark:text-stone-300">Descripción</span>
