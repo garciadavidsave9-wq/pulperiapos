@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import * as XLSX from 'xlsx'
 import { ToastProvider, useToast } from './components/Toast'
 import Inventory from './components/Inventory'
 import Sale from './components/Sale'
@@ -8,6 +9,7 @@ import { hasSupabaseConfig, supabase } from './lib/supabase'
 import { deleteItem, exportAll, getAll, importAll, putItem, uid } from './lib/db'
 import { seedIfNeeded } from './lib/seed'
 import { findDuplicateProduct, normalizeBarcode } from './lib/barcode'
+import { parseImportedRows } from './lib/importProducts'
 
 const NAV = [
   { id: 'sale', label: 'Venta', icon: '🛒' },
@@ -31,6 +33,9 @@ function Shell() {
   const [sales, setSales] = useState([])
   const [dark, setDark] = useState(() => localStorage.getItem('pos-theme') === 'dark')
   const [ready, setReady] = useState(false)
+  const [importPreview, setImportPreview] = useState([])
+  const [importDialogOpen, setImportDialogOpen] = useState(false)
+  const [importing, setImporting] = useState(false)
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark)
@@ -282,6 +287,109 @@ function Shell() {
     }
   }
 
+  async function importExcelFile(file) {
+    try {
+      const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' })
+      const firstSheetName = workbook.SheetNames[0]
+      const rows = XLSX.utils.sheet_to_json(workbook.Sheets[firstSheetName], {
+        defval: '',
+        raw: false,
+        blankrows: false,
+      })
+
+      const { validRows, invalidRows } = parseImportedRows(rows)
+      const preview = [
+        ...validRows.map((row) => ({
+          status: 'valid',
+          name: row.name,
+          price: Number(row.price || 0),
+          stock: row.stock ?? '',
+          reason: '',
+          ...row,
+        })),
+        ...invalidRows.map((row) => ({
+          status: 'invalid',
+          name: row.raw?.Nombre || row.raw?.nombre || row.raw?.name || 'Sin nombre',
+          price: row.raw?.Precio || row.raw?.precio || row.raw?.price || '',
+          stock: row.raw?.['Cantidad disponible'] || row.raw?.cantidad || row.raw?.stock || '',
+          reason: row.reason,
+          ...row.raw,
+        })),
+      ]
+
+      if (preview.length === 0) {
+        push('No se encontraron filas válidas para importar.', 'warn')
+        return
+      }
+
+      setImportPreview(preview)
+      setImportDialogOpen(true)
+    } catch {
+      push('No se pudo leer el archivo Excel. Revisa que sea un .xlsx válido.', 'error')
+    }
+  }
+
+  async function confirmImport() {
+    const validProducts = importPreview.filter((row) => row.status === 'valid')
+    if (!validProducts.length) {
+      push('No hay productos válidos para importar.', 'warn')
+      return
+    }
+
+    setImporting(true)
+    const now = new Date().toISOString()
+    const payload = validProducts.map((row) => ({
+      id: uid('prd'),
+      name: String(row.name || '').trim(),
+      description: String(row.description || '').trim(),
+      codigo_barras: normalizeBarcode(row.codigo_barras || ''),
+      price: Number(row.price || 0),
+      tags: Array.isArray(row.tags) ? row.tags : [],
+      stock: row.stock == null || row.stock === '' ? null : Number(row.stock),
+      favorite: Boolean(row.favorite),
+      photo: row.photo || '',
+      createdAt: now,
+      updatedAt: now,
+    }))
+
+    try {
+      if (hasSupabaseConfig() && supabase) {
+        const { error } = await supabase.from('products').insert(
+          payload.map((product) => ({
+            id: product.id,
+            name: product.name,
+            description: product.description || '',
+            codigo_barras: product.codigo_barras,
+            price_lempiras: Number(product.price || 0),
+            tags: product.tags,
+            stock: product.stock == null ? null : Number(product.stock),
+            favorite: Boolean(product.favorite),
+            photo_url: product.photo || '',
+            created_at: product.createdAt,
+            updated_at: product.updatedAt,
+          }))
+        )
+        if (error) throw error
+      } else {
+        for (const product of payload) {
+          await putItem('products', product)
+        }
+      }
+
+      await refresh()
+      setImportPreview([])
+      setImportDialogOpen(false)
+      const importedCount = payload.length
+      const omittedCount = importPreview.filter((row) => row.status === 'invalid').length
+      push(`${importedCount} productos importados, ${omittedCount} omitidos`)
+    } catch (error) {
+      console.error(error)
+      push('No se pudo guardar la importación. Revisa los datos del archivo.', 'error')
+    } finally {
+      setImporting(false)
+    }
+  }
+
   return (
     <div className="min-h-dvh bg-[#f4ece3] text-stone-900 dark:bg-stone-950 dark:text-stone-100">
       <header className="sticky top-0 z-20 border-b border-stone-200/80 bg-[#f4ece3]/90 backdrop-blur dark:border-stone-800 dark:bg-stone-950/90">
@@ -304,11 +412,17 @@ function Shell() {
               Importar
               <input
                 type="file"
-                accept="application/json"
+                accept=".json,.xlsx,.xls"
                 className="hidden"
                 onChange={(e) => {
                   const file = e.target.files?.[0]
-                  if (file) restore(file)
+                  if (!file) return
+                  const lower = file.name.toLowerCase()
+                  if (lower.endsWith('.json')) {
+                    restore(file)
+                  } else {
+                    importExcelFile(file)
+                  }
                   e.target.value = ''
                 }}
               />
@@ -329,6 +443,82 @@ function Shell() {
           ))}
         </nav>
       </header>
+
+      {importDialogOpen && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 p-3 sm:items-center">
+          <div className="animate-pop w-full max-w-4xl overflow-hidden rounded-3xl bg-white shadow-2xl dark:bg-stone-800">
+            <div className="flex items-center justify-between border-b border-stone-200 px-5 py-4 dark:border-stone-700">
+              <div>
+                <h3 className="text-xl font-black text-stone-800 dark:text-stone-100">Vista previa de importación</h3>
+                <p className="text-sm text-stone-500 dark:text-stone-400">
+                  {importPreview.filter((row) => row.status === 'valid').length} productos válidos ·{' '}
+                  {importPreview.filter((row) => row.status === 'invalid').length} omitidos
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setImportDialogOpen(false)}
+                className="min-h-12 rounded-2xl bg-stone-100 px-4 font-bold dark:bg-stone-700"
+              >
+                Cerrar
+              </button>
+            </div>
+
+            <div className="max-h-[70vh] overflow-auto p-4">
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="border-b border-stone-200 text-stone-600 dark:border-stone-700 dark:text-stone-300">
+                    <th className="px-2 py-3 font-bold">Nombre</th>
+                    <th className="px-2 py-3 font-bold">Precio</th>
+                    <th className="px-2 py-3 font-bold">Cantidad</th>
+                    <th className="px-2 py-3 font-bold">Estado</th>
+                    <th className="px-2 py-3 font-bold">Motivo</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {importPreview.map((row, index) => (
+                    <tr key={`${row.name}-${index}`} className="border-b border-stone-100 align-top dark:border-stone-700">
+                      <td className="px-2 py-3 font-semibold text-stone-800 dark:text-stone-100">{row.name || 'Sin nombre'}</td>
+                      <td className="px-2 py-3 text-stone-700 dark:text-stone-200">{row.price !== '' && row.price !== undefined ? `L. ${Number(row.price).toLocaleString('es-HN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '-'}</td>
+                      <td className="px-2 py-3 text-stone-700 dark:text-stone-200">{row.stock !== '' && row.stock != null ? row.stock : '-'}</td>
+                      <td className="px-2 py-3">
+                        <span
+                          className={`rounded-full px-2 py-1 text-xs font-bold ${
+                            row.status === 'valid'
+                              ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
+                              : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
+                          }`}
+                        >
+                          {row.status === 'valid' ? 'Lista' : 'Omitida'}
+                        </span>
+                      </td>
+                      <td className="px-2 py-3 text-stone-600 dark:text-stone-300">{row.reason || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="flex flex-col gap-3 border-t border-stone-200 px-5 py-4 dark:border-stone-700 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                onClick={() => setImportDialogOpen(false)}
+                className="min-h-12 rounded-2xl bg-stone-200 px-5 font-bold dark:bg-stone-700"
+              >
+                Revisar más tarde
+              </button>
+              <button
+                type="button"
+                disabled={importing || !importPreview.some((row) => row.status === 'valid')}
+                onClick={confirmImport}
+                className="min-h-12 rounded-2xl bg-clay-500 px-5 font-bold text-white disabled:opacity-60"
+              >
+                {importing ? 'Importando…' : 'Confirmar importación'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <main className="mx-auto max-w-7xl px-4 py-4 pb-28 md:pb-8">
         {!ready ? (

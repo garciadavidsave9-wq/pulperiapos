@@ -1,9 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Html5Qrcode } from 'html5-qrcode'
 import { compressImage, dataUrlToBlob, isValidImageFile } from '../lib/utils'
 import { LOW_STOCK, parseTags } from '../lib/utils'
 import { hasSupabaseConfig, supabase } from '../lib/supabase'
-import { fetchProductFromOpenFoodFacts, findDuplicateProduct, normalizeBarcode } from '../lib/barcode'
+import { findDuplicateProduct, normalizeBarcode } from '../lib/barcode'
 
 const EMPTY = {
   name: '',
@@ -21,18 +20,12 @@ export default function ProductForm({ product, products = [], onSave, onCancel, 
   const [error, setError] = useState('')
   const [compressing, setCompressing] = useState(false)
   const [photoInfo, setPhotoInfo] = useState('')
-  const [scanInfo, setScanInfo] = useState('')
-  const [scannerOpen, setScannerOpen] = useState(false)
-  const [scannerBusy, setScannerBusy] = useState(false)
+  const [voiceMessage, setVoiceMessage] = useState('')
+  const [voiceListening, setVoiceListening] = useState(false)
   const [duplicateProduct, setDuplicateProduct] = useState(null)
 
-  const scannerRef = useRef(null)
-
-  function formatScannerError(stage, err) {
-    const name = err?.name || 'Error'
-    const message = err?.message || 'Sin detalle disponible.'
-    return `Escáner (${stage}) falló: ${name}: ${message}`
-  }
+  const recognitionRef = useRef(null)
+  const voiceSupported = typeof window !== 'undefined' && ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window)
 
   useEffect(() => {
     if (product) {
@@ -51,10 +44,13 @@ export default function ProductForm({ product, products = [], onSave, onCancel, 
       setForm(EMPTY)
     }
     setError('')
-    setScanInfo('')
+    setVoiceMessage('')
     setDuplicateProduct(null)
     return () => {
-      stopScanner()
+      if (recognitionRef.current) {
+        recognitionRef.current.stop()
+        recognitionRef.current = null
+      }
     }
   }, [product])
 
@@ -64,146 +60,77 @@ export default function ProductForm({ product, products = [], onSave, onCancel, 
     return Number(form.stock) <= LOW_STOCK
   }, [form.stock])
 
-  async function stopScanner() {
-    if (scannerRef.current) {
-      try {
-        await scannerRef.current.stop()
-      } catch {
-        // Ignora errores de cierre del scanner.
+  function startVoiceInput() {
+    const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (!SpeechRecognitionCtor) {
+      setVoiceMessage('Entrada por voz no disponible en este navegador.')
+      return
+    }
+
+    const tryStart = (lang) => {
+      const recognition = new SpeechRecognitionCtor()
+      recognition.lang = lang
+      recognition.continuous = false
+      recognition.interimResults = false
+      recognition.maxAlternatives = 1
+
+      recognition.onstart = () => {
+        setVoiceListening(true)
+        setVoiceMessage('Escuchando…')
       }
-      scannerRef.current = null
-    }
-  }
 
-  async function handleScannedCode(rawValue) {
-    const normalized = normalizeBarcode(rawValue)
-    if (!normalized) {
-      setError('No se pudo leer un código válido. Intenta otra vez.')
-      return
-    }
+      recognition.onresult = (event) => {
+        const transcript = Array.from(event.results)
+          .map((result) => result[0]?.transcript || '')
+          .join(' ')
+          .trim()
 
-    setForm((prev) => ({ ...prev, codigo_barras: normalized }))
-    setScanInfo('Código detectado. Verificando producto…')
-    setError('')
-    setDuplicateProduct(null)
+        if (!transcript) return
 
-    const duplicate = findDuplicateProduct(products, normalized, product?.id)
-    if (duplicate) {
-      setDuplicateProduct(duplicate)
-      setScanInfo('')
-      setError('Este producto ya existe.')
-      await stopScanner()
-      setScannerOpen(false)
-      return
+        setForm((prev) => ({ ...prev, name: transcript }))
+        setVoiceMessage('Texto dictado cargado. Puedes editarlo antes de guardar.')
+      }
+
+      recognition.onerror = (event) => {
+        const code = event?.error || ''
+        if (code === 'language-not-supported') {
+          if (lang !== 'es-419') {
+            tryStart('es-419')
+            return
+          }
+          setVoiceMessage('')
+          return
+        }
+
+        if (code === 'not-allowed' || code === 'service-not-allowed') {
+          setVoiceMessage('No se pudo acceder al micrófono. Permite el acceso para usar entrada por voz.')
+          return
+        }
+
+        if (code === 'not-supported' || code === 'no-speech' || code === 'audio-capture' || code === 'aborted') {
+          setVoiceMessage('')
+          return
+        }
+      }
+
+      recognition.onend = () => {
+        setVoiceListening(false)
+        recognitionRef.current = null
+      }
+
+      recognitionRef.current = recognition
+      recognition.start()
     }
 
     try {
-      const productMatch = await fetchProductFromOpenFoodFacts(normalized)
-      if (productMatch) {
-        setForm((prev) => ({
-          ...prev,
-          name: productMatch.name || prev.name,
-          description: productMatch.description || prev.description,
-          codigo_barras: normalized,
-        }))
-        setScanInfo('Datos cargados desde Open Food Facts. Puedes corregirlos antes de guardar.')
-        setError('')
-      } else {
-        setScanInfo('Producto no encontrado, completa los datos manualmente.')
-      }
+      tryStart('es-HN')
     } catch {
-      setScanInfo('Producto no encontrado, completa los datos manualmente.')
-    } finally {
-      await stopScanner()
-      setScannerOpen(false)
-    }
-  }
-
-  useEffect(() => {
-    if (!scannerOpen) return
-
-    let cancelled = false
-
-    const initializeCamera = async () => {
       try {
-        setScannerBusy(true)
-        setError('')
-        setScanInfo('Solicitando acceso a la cámara…')
-
-        const containerId = 'barcode-reader'
-        let container = document.getElementById(containerId)
-        if (!container) {
-          container = document.createElement('div')
-          container.id = containerId
-          container.style.display = 'block'
-          container.style.width = '100%'
-          container.style.maxWidth = '420px'
-          container.style.margin = '0 auto'
-          document.body.appendChild(container)
-        }
-
-        if (cancelled) return
-
-        const html5QrCode = new Html5Qrcode(containerId)
-        scannerRef.current = html5QrCode
-
-        const config = {
-          fps: 10,
-          qrbox: { width: 250, height: 150 },
-          aspectRatio: 1.33,
-        }
-
-        await html5QrCode.start(
-          { facingMode: 'environment' },
-          config,
-          async (decodedText) => {
-            await handleScannedCode(decodedText)
-            try {
-              await html5QrCode.stop()
-            } catch {
-              // Ignora cierre del escáner.
-            }
-            setScannerOpen(false)
-          },
-          () => {
-            // Ignoramos los frames sin lectura; se reintenta automáticamente.
-          },
-          ['EAN_13', 'UPC_A']
-        )
-      } catch (err) {
-        setError(formatScannerError('start()', err))
-        setScanInfo('')
-        setScannerOpen(false)
-      } finally {
-        if (!cancelled) {
-          setScannerBusy(false)
-        }
+        tryStart('es-419')
+      } catch {
+        setVoiceMessage('Entrada por voz no disponible en este navegador.')
       }
     }
-
-    const frame = requestAnimationFrame(() => {
-      initializeCamera()
-    })
-
-    return () => {
-      cancelled = true
-      cancelAnimationFrame(frame)
-      if (scannerRef.current) {
-        scannerRef.current.stop().catch(() => {})
-        scannerRef.current = null
-      }
-      const container = document.getElementById('barcode-reader')
-      if (container && container.dataset.generated === 'true') {
-        container.remove()
-      }
-    }
-  }, [scannerOpen])
-
-  async function startScanner() {
-    await stopScanner()
-    setError('')
-    setScanInfo('Preparando cámara…')
-    setScannerOpen(true)
   }
 
   async function onFile(e) {
@@ -301,13 +228,19 @@ export default function ProductForm({ product, products = [], onSave, onCancel, 
           <div className="block sm:col-span-2">
             <div className="mb-1 flex items-center justify-between gap-2">
               <span className="text-sm font-semibold text-stone-600 dark:text-stone-300">Nombre *</span>
-              <button
-                type="button"
-                onClick={startScanner}
-                className="rounded-2xl bg-emerald-100 px-3 py-2 text-xs font-bold text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200"
-              >
-                Escanear código de barras
-              </button>
+              {voiceSupported ? (
+                <button
+                  type="button"
+                  onClick={startVoiceInput}
+                  className={`rounded-2xl px-3 py-2 text-xs font-bold ${
+                    voiceListening
+                      ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-200'
+                      : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200'
+                  }`}
+                >
+                  {voiceListening ? 'Escuchando…' : '🎤 Voz'}
+                </button>
+              ) : null}
             </div>
             <input
               value={form.name}
@@ -315,6 +248,14 @@ export default function ProductForm({ product, products = [], onSave, onCancel, 
               className="min-h-14 w-full rounded-2xl border border-stone-200 bg-stone-50 px-4 text-lg dark:border-stone-600 dark:bg-stone-900"
               placeholder="Ej. Coca-Cola fresca 600ml"
             />
+            {!voiceSupported && (
+              <p className="mt-2 text-xs font-medium text-stone-500 dark:text-stone-400">
+                Entrada por voz no disponible en este navegador.
+              </p>
+            )}
+            {voiceMessage && (
+              <p className="mt-2 text-xs font-semibold text-emerald-700 dark:text-emerald-300">{voiceMessage}</p>
+            )}
           </div>
 
           <div className="block sm:col-span-2">
@@ -325,32 +266,9 @@ export default function ProductForm({ product, products = [], onSave, onCancel, 
               type="text"
               inputMode="numeric"
               className="min-h-14 w-full rounded-2xl border border-stone-200 bg-stone-50 px-4 text-lg dark:border-stone-600 dark:bg-stone-900"
-              placeholder="Escanea o ingresa el código"
+              placeholder="Opcional: para registrar el código manualmente"
             />
           </div>
-
-          {scannerOpen && (
-            <div className="sm:col-span-2 overflow-hidden rounded-3xl border border-stone-200 bg-stone-100 p-3 dark:border-stone-700 dark:bg-stone-900">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <p className="text-sm font-semibold text-stone-700 dark:text-stone-200">Escáner</p>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    await stopScanner()
-                    setScannerOpen(false)
-                    setScanInfo('')
-                  }}
-                  className="rounded-xl bg-stone-200 px-3 py-1.5 text-sm font-bold dark:bg-stone-700"
-                >
-                  Cerrar
-                </button>
-              </div>
-              <div id="barcode-reader" className="aspect-video w-full overflow-hidden rounded-2xl bg-black" />
-              <div className="mt-3 flex items-center justify-between gap-2 text-sm text-stone-600 dark:text-stone-300">
-                <span>{scannerBusy ? 'Activando cámara…' : 'Apunta al código EAN-13 o UPC-A'}</span>
-              </div>
-            </div>
-          )}
 
           {duplicateProduct && (
             <div className="sm:col-span-2 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-800 dark:bg-amber-950/30">
@@ -366,12 +284,6 @@ export default function ProductForm({ product, products = [], onSave, onCancel, 
                 Editar producto existente
               </button>
             </div>
-          )}
-
-          {scanInfo && (
-            <p className="sm:col-span-2 rounded-2xl bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300">
-              {scanInfo}
-            </p>
           )}
 
           <label className="block sm:col-span-2">
